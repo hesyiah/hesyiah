@@ -1,71 +1,134 @@
 import os
+import re
 import sys
-
-# 定义要查找的目标文件/文件夹清单
-# 键为描述，值为相对路径
-TARGETS = {
-    "IMSI (联系人配置)": r"data\com.android.contacts\shared_prefs\com.android.contacts_preferences.xml",
-    "缩略图缓存 (小米)": r"media\0\Android\data\com.miui.gallery\files\gallery_disk_cache",
-    "安卓电话服务数据": r"user_de\0\com.android.server.telecom\files\phone-account-registrar-state.xml",
-    "IMEI (电话配置)": r"user_de\0\com.android.phone\shared_prefs\com.android.phone_preferences.xml",
-    "Wi-Fi 配置/MAC地址": r"misc\wifi\WifiConfigStore.xml"
-}
+import urllib.parse  # 用于解码 %2B 为 +
 
 def normalize_path(path):
-    """
-    清理路径，去除首尾的空白和引号
-    """
     return path.strip().strip('"').strip("'")
 
-def check_files(base_path):
-    if not os.path.exists(base_path):
-        print(f"\n[错误] 路径不存在: {base_path}")
-        return
+def read_file_content(filepath):
+    if not os.path.exists(filepath):
+        return None, "❌ 文件不存在"
+    try:
+        # 尝试 utf-8 读取，如果失败尝试 latin-1
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read(), "OK"
+    except Exception as e:
+        return None, f"❌ 读取错误: {str(e)}"
 
-    print(f"\n正在扫描根目录: {base_path}")
-    print("=" * 80)
-    print(f"{'描述':<25} | {'状态':<12} | {'相对路径'}")
-    print("-" * 80)
+def extract_from_telecom_registrar(base_path):
+    """
+    专门解析 phone-account-registrar-state.xml
+    提取：手机号 (handle/subscription_number), ICCID (id), 运营商 (label)
+    """
+    rel_path = r"user_de\0\com.android.server.telecom\files\phone-account-registrar-state.xml"
+    full_path = os.path.join(base_path, os.path.normpath(rel_path))
+    
+    content, status = read_file_content(full_path)
+    if not content:
+        return [("电信服务数据", status, full_path)]
 
-    found_count = 0
+    extracted_data = []
 
-    for desc, relative_path in TARGETS.items():
-        # 1. 处理相对路径：去除开头的斜杠，防止 os.path.join 将其视为绝对路径
-        clean_rel_path = relative_path.lstrip("\\").lstrip("/")
-        
-        # 2. 根据操作系统规范化路径分隔符 (Windows用\, Linux用/)
-        clean_rel_path = os.path.normpath(clean_rel_path)
-        
-        # 3. 拼接完整路径
-        full_path = os.path.join(base_path, clean_rel_path)
+    # 1. 提取手机号 (处理 URL 编码，如 %2B -> +)
+    # 匹配 <handle>tel:xxx</handle> 或 <subscription_number>tel:xxx</subscription_number>
+    phone_matches = re.findall(r'<(?:handle|subscription_number)>tel:(.*?)</(?:handle|subscription_number)>', content)
+    
+    unique_phones = set()
+    for p in phone_matches:
+        # 解码，例如把 %2B86177... 解码为 +86177...
+        decoded_num = urllib.parse.unquote(p)
+        if len(decoded_num) > 5:  # 过滤掉过短的无效字符
+            unique_phones.add(decoded_num)
+    
+    if unique_phones:
+        extracted_data.append(("手机号码", f"✅ {', '.join(unique_phones)}", full_path))
+    else:
+        extracted_data.append(("手机号码", "⚠️ 未找到号码", full_path))
 
-        # 4. 检查是否存在
-        if os.path.exists(full_path):
-            if os.path.isdir(full_path):
-                status = "✅ 目录存在"
-            else:
-                status = "✅ 文件存在"
-            found_count += 1
-        else:
-            status = "❌ 未找到"
+    # 2. 提取 ICCID (SIM卡物理卡号，通常在 <id> 标签内，8986开头)
+    # XML 片段: <id>89860321245124114178</id>
+    id_matches = re.findall(r'<id>(\d{18,22})</id>', content)
+    if id_matches:
+        # 去重
+        unique_ids = list(set(id_matches))
+        extracted_data.append(("ICCID (SIM卡号)", f"✅ {', '.join(unique_ids)}", full_path))
+    else:
+        extracted_data.append(("ICCID (SIM卡号)", "⚠️ 未找到", full_path))
 
-        # 5. 输出结果 (使用 ljust 对齐)
-        # 注意：包含中文字符时对齐可能略有偏差，这是终端字体特性
-        print(f"{desc:<25} | {status:<12} | {clean_rel_path}")
+    # 3. 提取运营商标签
+    # XML 片段: <label>中国电信</label>
+    label_matches = re.findall(r'<label>(.*?)</label>', content)
+    if label_matches:
+         extracted_data.append(("运营商", f"✅ {', '.join(set(label_matches))}", full_path))
 
-    print("=" * 80)
-    print(f"扫描完成。共找到 {found_count} / {len(TARGETS)} 个项目。")
+    return extracted_data
+
+def extract_imsi_fallback(base_path):
+    """
+    尝试从 contacts_preferences 中查找真正的 IMSI (460开头)
+    """
+    rel_path = r"data\com.android.contacts\shared_prefs\com.android.contacts_preferences.xml"
+    full_path = os.path.join(base_path, os.path.normpath(rel_path))
+    
+    content, status = read_file_content(full_path)
+    if not content:
+        return ("IMSI (从联系人)", "❌ 文件不存在或无法读取", full_path)
+
+    # 匹配 460 开头的 15 位数字
+    matches = re.findall(r'\D(460\d{12})\D', content)
+    if matches:
+        return ("IMSI (从联系人)", f"✅ {matches[0]}", full_path)
+    else:
+        return ("IMSI (从联系人)", "⚠️ 未找到 460 开头的IMSI", full_path)
+
+def extract_imei_fallback(base_path):
+    """
+    尝试提取 IMEI
+    """
+    rel_path = r"user_de\0\com.android.phone\shared_prefs\com.android.phone_preferences.xml"
+    full_path = os.path.join(base_path, os.path.normpath(rel_path))
+    content, status = read_file_content(full_path)
+    if not content:
+         return ("IMEI", status, full_path)
+    
+    # 宽泛匹配 15 位数字，通常 IMEI 以 35, 86, 99 开头
+    matches = re.findall(r'\D(\d{15})\D', content)
+    valid_imeis = [m for m in matches if not m.startswith('460') and not m.startswith('8986')]
+    
+    if valid_imeis:
+        return ("IMEI", f"✅ {valid_imeis[0]}", full_path)
+    else:
+        return ("IMEI", "⚠️ 未找到明显 IMEI", full_path)
+
+def main():
+    print("=== Android 关键数据提取 (增强版) ===")
+    if len(sys.argv) > 1:
+        base_path = sys.argv[1]
+    else:
+        print("请输入手机提取数据的【根文件夹】路径：")
+        base_path = input(">>> ")
+
+    base_path = normalize_path(base_path)
+    print(f"\n正在分析路径: {base_path}")
+    print("=" * 90)
+    print(f"{'目标信息':<15} | {'提取结果':<40} | {'来源文件'}")
+    print("-" * 90)
+
+    # 1. 执行核心提取 (针对你提供的 XML)
+    telecom_results = extract_from_telecom_registrar(base_path)
+    for name, res, path in telecom_results:
+        print(f"{name:<15} | {res:<40} | {os.path.basename(path)}")
+
+    # 2. 执行补充提取 (IMSI 和 IMEI)
+    imsi_res = extract_imsi_fallback(base_path)
+    print(f"{imsi_res[0]:<15} | {imsi_res[1]:<40} | {os.path.basename(imsi_res[2])}")
+
+    imei_res = extract_imei_fallback(base_path)
+    print(f"{imei_res[0]:<15} | {imei_res[1]:<40} | {os.path.basename(imei_res[2])}")
+    
+    print("=" * 90)
+    print("提示: ICCID (8986...) 是 SIM 卡硬件号，IMSI (460...) 是网络识别号。")
 
 if __name__ == "__main__":
-    # 获取用户输入路径
-    # 方式1：通过命令行参数传入 python script.py "D:\MobileDump"
-    if len(sys.argv) > 1:
-        target_dir = sys.argv[1]
-    # 方式2：直接运行脚本后输入
-    else:
-        print("请提供手机数据提取的【根文件夹】路径。")
-        print("例如：D:\\Case001\\Extraction\\data 或者 root\\")
-        target_dir = input("请输入路径: ")
-
-    target_dir = normalize_path(target_dir)
-    check_files(target_dir)
+    main()
