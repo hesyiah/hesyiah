@@ -3,132 +3,163 @@ import re
 import sys
 import urllib.parse  # 用于解码 %2B 为 +
 
+# ================= 工具函数 =================
+
 def normalize_path(path):
+    """清理路径字符串"""
     return path.strip().strip('"').strip("'")
 
 def read_file_content(filepath):
+    """安全读取文件内容"""
     if not os.path.exists(filepath):
         return None, "❌ 文件不存在"
     try:
-        # 尝试 utf-8 读取，如果失败尝试 latin-1
+        # 优先尝试 utf-8，失败则忽略错误
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             return f.read(), "OK"
     except Exception as e:
         return None, f"❌ 读取错误: {str(e)}"
 
-def extract_from_telecom_registrar(base_path):
+# ================= 提取逻辑模块 =================
+
+def extract_telecom_data(base_path):
     """
-    专门解析 phone-account-registrar-state.xml
-    提取：手机号 (handle/subscription_number), ICCID (id), 运营商 (label)
+    模块1：从 phone-account-registrar-state.xml 提取
+    目标：手机号, ICCID (Sim卡号), 运营商
     """
     rel_path = r"user_de\0\com.android.server.telecom\files\phone-account-registrar-state.xml"
     full_path = os.path.join(base_path, os.path.normpath(rel_path))
     
     content, status = read_file_content(full_path)
     if not content:
-        return [("电信服务数据", status, full_path)]
+        return [("电信服务数据", status, os.path.basename(full_path))]
 
-    extracted_data = []
+    results = []
 
-    # 1. 提取手机号 (处理 URL 编码，如 %2B -> +)
-    # 匹配 <handle>tel:xxx</handle> 或 <subscription_number>tel:xxx</subscription_number>
+    # 1. 手机号 (解码 URL, 如 %2B86...)
     phone_matches = re.findall(r'<(?:handle|subscription_number)>tel:(.*?)</(?:handle|subscription_number)>', content)
-    
     unique_phones = set()
     for p in phone_matches:
-        # 解码，例如把 %2B86177... 解码为 +86177...
         decoded_num = urllib.parse.unquote(p)
-        if len(decoded_num) > 5:  # 过滤掉过短的无效字符
+        if len(decoded_num) > 5:
             unique_phones.add(decoded_num)
     
     if unique_phones:
-        extracted_data.append(("手机号码", f"✅ {', '.join(unique_phones)}", full_path))
+        results.append(("手机号码", f"✅ {', '.join(unique_phones)}", os.path.basename(full_path)))
     else:
-        extracted_data.append(("手机号码", "⚠️ 未找到号码", full_path))
+        results.append(("手机号码", "⚠️ 未找到号码", os.path.basename(full_path)))
 
-    # 2. 提取 ICCID (SIM卡物理卡号，通常在 <id> 标签内，8986开头)
-    # XML 片段: <id>89860321245124114178</id>
-    id_matches = re.findall(r'<id>(\d{18,22})</id>', content)
-    if id_matches:
-        # 去重
-        unique_ids = list(set(id_matches))
-        extracted_data.append(("ICCID (SIM卡号)", f"✅ {', '.join(unique_ids)}", full_path))
+    # 2. ICCID (SIM卡物理卡号, 8986开头, 20位)
+    # 匹配 <id>8986...</id>
+    iccid_matches = re.findall(r'<id>(\d{18,22})</id>', content)
+    if iccid_matches:
+        results.append(("ICCID (SIM卡号)", f"✅ {', '.join(set(iccid_matches))}", os.path.basename(full_path)))
     else:
-        extracted_data.append(("ICCID (SIM卡号)", "⚠️ 未找到", full_path))
+        # 尝试从 XML 属性中找
+        results.append(("ICCID (SIM卡号)", "⚠️ 未找到", os.path.basename(full_path)))
 
-    # 3. 提取运营商标签
-    # XML 片段: <label>中国电信</label>
+    # 3. 运营商
     label_matches = re.findall(r'<label>(.*?)</label>', content)
     if label_matches:
-         extracted_data.append(("运营商", f"✅ {', '.join(set(label_matches))}", full_path))
+         results.append(("运营商", f"✅ {', '.join(set(label_matches))}", os.path.basename(full_path)))
 
-    return extracted_data
+    return results
 
-def extract_imsi_fallback(base_path):
+def extract_imsi_contacts(base_path):
     """
-    尝试从 contacts_preferences 中查找真正的 IMSI (460开头)
+    模块2：从 contacts_preferences.xml 提取
+    目标：IMSI (460开头)
     """
     rel_path = r"data\com.android.contacts\shared_prefs\com.android.contacts_preferences.xml"
     full_path = os.path.join(base_path, os.path.normpath(rel_path))
     
     content, status = read_file_content(full_path)
     if not content:
-        return ("IMSI (从联系人)", "❌ 文件不存在或无法读取", full_path)
+        return [("IMSI (用户识别码)", "❌ 文件不存在", os.path.basename(full_path))]
 
-    # 匹配 460 开头的 15 位数字
+    # 查找 460 开头的 15 位数字
+    # \D 表示前后不是数字，防止截断
     matches = re.findall(r'\D(460\d{12})\D', content)
     if matches:
-        return ("IMSI (从联系人)", f"✅ {matches[0]}", full_path)
+        return [("IMSI (用户识别码)", f"✅ {matches[0]}", os.path.basename(full_path))]
     else:
-        return ("IMSI (从联系人)", "⚠️ 未找到 460 开头的IMSI", full_path)
+        return [("IMSI (用户识别码)", "⚠️ 未找到", os.path.basename(full_path))]
 
-def extract_imei_fallback(base_path):
+def extract_imei_enhanced(base_path):
     """
-    尝试提取 IMEI
+    模块3：从 phone_preferences.xml 提取 (增强版)
+    目标：IMEI (15位)
+    过滤：MEID (14位), ICCID (20位)
     """
     rel_path = r"user_de\0\com.android.phone\shared_prefs\com.android.phone_preferences.xml"
     full_path = os.path.join(base_path, os.path.normpath(rel_path))
+    
     content, status = read_file_content(full_path)
     if not content:
-         return ("IMEI", status, full_path)
+         return [("IMEI (设备识别码)", status, os.path.basename(full_path))]
     
-    # 宽泛匹配 15 位数字，通常 IMEI 以 35, 86, 99 开头
-    matches = re.findall(r'\D(\d{15})\D', content)
-    valid_imeis = [m for m in matches if not m.startswith('460') and not m.startswith('8986')]
-    
-    if valid_imeis:
-        return ("IMEI", f"✅ {valid_imeis[0]}", full_path)
+    found_imeis = set()
+
+    # 策略 A: 基于您提供的 XML 键名进行精准匹配
+    # 匹配 key_imei_slotX, device_id_key, small_device_id_key
+    key_pattern = r'<string name="[^"]*?(?:imei|device_id)[^"]*?">(\d{15})</string>'
+    matches_keys = re.findall(key_pattern, content, re.IGNORECASE)
+    for m in matches_keys:
+        found_imeis.add(m)
+
+    # 策略 B: 兜底匹配 (如果键名变了)
+    # 查找所有 15 位数字，但必须排除 IMSI (460开头)
+    # 注意：IMEI 通常以 86, 35, 99, 01 开头
+    value_pattern = r'>(\d{15})<'
+    matches_values = re.findall(value_pattern, content)
+    for val in matches_values:
+        if not val.startswith('460'): # 简单排除 IMSI
+            found_imeis.add(val)
+
+    if found_imeis:
+        return [("IMEI (设备识别码)", f"✅ {', '.join(found_imeis)}", os.path.basename(full_path))]
     else:
-        return ("IMEI", "⚠️ 未找到明显 IMEI", full_path)
+        return [("IMEI (设备识别码)", "⚠️ 未找到有效 IMEI", os.path.basename(full_path))]
+
+# ================= 主程序 =================
 
 def main():
-    print("=== Android 关键数据提取 (增强版) ===")
+    print("==========================================")
+    print("   Android 关键取证数据综合提取工具 v2.0   ")
+    print("==========================================\n")
+    
     if len(sys.argv) > 1:
         base_path = sys.argv[1]
     else:
-        print("请输入手机提取数据的【根文件夹】路径：")
-        base_path = input(">>> ")
+        print("请提供手机数据提取的【根文件夹】路径")
+        print("通常包含 data, user_de, media 等文件夹")
+        base_path = input("请输入路径 >>> ")
 
     base_path = normalize_path(base_path)
-    print(f"\n正在分析路径: {base_path}")
-    print("=" * 90)
-    print(f"{'目标信息':<15} | {'提取结果':<40} | {'来源文件'}")
-    print("-" * 90)
-
-    # 1. 执行核心提取 (针对你提供的 XML)
-    telecom_results = extract_from_telecom_registrar(base_path)
-    for name, res, path in telecom_results:
-        print(f"{name:<15} | {res:<40} | {os.path.basename(path)}")
-
-    # 2. 执行补充提取 (IMSI 和 IMEI)
-    imsi_res = extract_imsi_fallback(base_path)
-    print(f"{imsi_res[0]:<15} | {imsi_res[1]:<40} | {os.path.basename(imsi_res[2])}")
-
-    imei_res = extract_imei_fallback(base_path)
-    print(f"{imei_res[0]:<15} | {imei_res[1]:<40} | {os.path.basename(imei_res[2])}")
     
-    print("=" * 90)
-    print("提示: ICCID (8986...) 是 SIM 卡硬件号，IMSI (460...) 是网络识别号。")
+    if not os.path.exists(base_path):
+        print(f"\n[错误] 路径不存在: {base_path}")
+        return
+
+    print(f"\n正在扫描: {base_path}")
+    print("-" * 95)
+    print(f"{'目标信息':<18} | {'提取结果':<45} | {'来源文件'}")
+    print("-" * 95)
+
+    all_results = []
+    
+    # 执行提取
+    all_results.extend(extract_telecom_data(base_path))  # 手机号/ICCID
+    all_results.extend(extract_imsi_contacts(base_path)) # IMSI
+    all_results.extend(extract_imei_enhanced(base_path)) # IMEI (新逻辑)
+
+    # 输出结果
+    for name, res, source in all_results:
+        print(f"{name:<18} | {res:<45} | {source}")
+
+    print("-" * 95)
+    print("扫描完成。")
+    print("说明: 若显示 '⚠️'，请确认文件是否存在，或尝试在 shared_prefs 文件夹中手动搜索相关数字。")
 
 if __name__ == "__main__":
     main()
