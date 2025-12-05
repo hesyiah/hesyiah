@@ -5,6 +5,7 @@ import sys
 # 键为描述，值为相对路径
 TARGETS = {
     "IMSI (联系人配置)": r"data\com.android.contacts\shared_prefs\com.android.contacts_preferences.xml",
+    "缩略图缓存 (小米)": r"media\0\Android\data\com.miui.gallery\files\gallery_disk_cache",
     "安卓电话服务数据": r"user_de\0\com.android.server.telecom\files\phone-account-registrar-state.xml",
     "IMEI (电话配置)": r"user_de\0\com.android.phone\shared_prefs\com.android.phone_preferences.xml",
     "Wi-Fi 配置/MAC地址": r"misc\wifi\WifiConfigStore.xml"
