@@ -122,7 +122,5 @@ def main():
         else:
             res_print = res
         print(f"{name:<18} | {res_print:<50} | {source}")
-    print("-" * 100)
-    print("提示: Wi-Fi MAC 包含历史连接热点的 BSSID 或手机随机 MAC。")
 if __name__ == "__main__":
     main()
