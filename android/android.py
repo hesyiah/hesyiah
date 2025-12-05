@@ -31,12 +31,12 @@ def extract_telecom_data(base_path):
     for p in phone_matches:
         decoded_num = urllib.parse.unquote(p)
         if len(decoded_num) > 5: unique_phones.add(decoded_num)
-    results.append(("手机号码", f"{', '.join(unique_phones)}" if unique_phones else "⚠️ 未找到", os.path.basename(full_path)))
+    results.append(("手机号码", f"{', '.join(unique_phones)}" if unique_phones else "未找到", os.path.basename(full_path)))
 
     # 提取 ICCID
     iccid_matches = re.findall(r'<id>(\d{18,22})</id>', content)
     unique_ids = set(iccid_matches)
-    results.append(("ICCID (SIM卡号)", f"{', '.join(unique_ids)}" if unique_ids else "⚠️ 未找到", os.path.basename(full_path)))
+    results.append(("ICCID (SIM卡号)", f"{', '.join(unique_ids)}" if unique_ids else "未找到", os.path.basename(full_path)))
 
     return results
 
@@ -112,10 +112,10 @@ def main():
     print(f"{'目标信息':<18} | {'提取结果':<50} | {'来源文件'}")
     print("-" * 100)
     all_results = []
-    all_results.extend(extract_telecom_data(base_path))  # 电话服务
-    all_results.extend(extract_imsi_contacts(base_path)) # IMSI
-    all_results.extend(extract_imei_enhanced(base_path)) # IMEI
-    all_results.extend(extract_wifi_info(base_path))     # Wi-Fi (新增)
+    all_results.extend(extract_telecom_data(base_path))  
+    all_results.extend(extract_imsi_contacts(base_path)) 
+    all_results.extend(extract_imei_enhanced(base_path)) 
+    all_results.extend(extract_wifi_info(base_path))    
     for name, res, source in all_results:
         if len(res) > 50:
             res_print = res[:47] + "..."
